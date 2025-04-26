@@ -1,5 +1,7 @@
 import csv
 import os
+import requests
+from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -9,15 +11,21 @@ class BiharElectionScraper:
         self.browser = None
         self.context = None
         self.page = None
-        self.output_file = "bihar_election_data.csv"
+        timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
+        self.output_file = f"bihar_election_data_{timestamp}.csv"
+        self.download_dir = "downloads"
+        os.makedirs(self.download_dir, exist_ok=True)
         self.ensure_csv_exists()
 
     def ensure_csv_exists(self):
-        """Create CSV file with headers if it doesn't exist."""
         if not Path(self.output_file).exists():
             with open(self.output_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["District", "Post", "Name", "Party", "Ward", "PDF_URL"])
+                writer.writerow([
+                    "District", "Post", "NagarNikay", "WardNo", "ReservationStatus",
+                    "CandidateName", "GuardianName", "Gender", "Age", "Category",
+                    "Address", "MobileNo", "CandidatePhotoFile", "AffidavitFile"
+                ])
 
     def start_browser(self):
         self.playwright = sync_playwright().start()
@@ -34,7 +42,6 @@ class BiharElectionScraper:
         self.page.wait_for_timeout(3000)
 
     def get_select_options(self, selector):
-        """Get dropdown option values and texts"""
         options = self.page.locator(selector).locator("option")
         count = options.count()
         values = []
@@ -52,8 +59,20 @@ class BiharElectionScraper:
         self.page.click("button.btnshow")
         self.page.wait_for_timeout(3000)
 
+    def download_file(self, url, filename):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(filename, "wb") as f:
+                f.write(response.content)
+            print(f"✅ Downloaded: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to download {url}: {e}")
+
     def extract_table_data(self, district, post):
+        self.page.wait_for_selector("table.table-bordered", timeout=5000)
         table = self.page.locator("table.table-bordered")
+
         if not table.is_visible():
             print("⛔ Table not visible, skipping...")
             return
@@ -61,36 +80,51 @@ class BiharElectionScraper:
         rows = table.locator("tbody tr")
         for i in range(rows.count()):
             cols = rows.nth(i).locator("td")
-            if cols.count() < 4:
+            if cols.count() < 15:
                 continue
-            name = cols.nth(0).inner_text()
-            party = cols.nth(1).inner_text()
-            ward = cols.nth(2).inner_text()
-            pdf_link_tag = cols.nth(3).locator("a")
-            pdf_url = pdf_link_tag.get_attribute("href") if pdf_link_tag.count() > 0 else ""
+
+            post_name = cols.nth(1).inner_text().strip()
+            district_name = cols.nth(2).inner_text().strip()
+            nagarnikay = cols.nth(3).inner_text().strip()
+            wardno = cols.nth(4).inner_text().strip()
+            reservation_status = cols.nth(5).inner_text().strip()
+            candidate_name = cols.nth(6).inner_text().strip()
+            guardian_name = cols.nth(7).inner_text().strip()
+            gender = cols.nth(8).inner_text().strip()
+            age = cols.nth(9).inner_text().strip()
+            category = cols.nth(10).inner_text().strip()
+            address = cols.nth(11).inner_text().strip()
+            mobile_no = cols.nth(12).inner_text().strip()
+
+            # Extract Photo and Affidavit
+            photo_url = cols.nth(13).locator("img").get_attribute("src") if cols.nth(13).locator("img").count() > 0 else ""
+            affidavit_url = cols.nth(14).locator("a").get_attribute("href") if cols.nth(14).locator("a").count() > 0 else ""
+
+            photo_filename = ""
+            affidavit_filename = ""
+
+            # Download Photo
+            if photo_url:
+                photo_filename = os.path.join(self.download_dir, f"{candidate_name.replace('/', '_')}_photo.jpg")
+                self.download_file(photo_url, photo_filename)
+
+            # Download Affidavit PDF
+            if affidavit_url:
+                affidavit_filename = os.path.join(self.download_dir, f"{candidate_name.replace('/', '_')}_affidavit.pdf")
+                self.download_file(affidavit_url, affidavit_filename)
 
             # Save to CSV
             with open(self.output_file, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([district, post, name, party, ward, pdf_url])
-
-            # Download PDF
-            if pdf_url:
-                self.download_pdf(pdf_url, name)
-
-    def download_pdf(self, url, name):
-        try:
-            download = self.page.wait_for_event("download", timeout=10000)
-            self.page.locator(f'a[href="{url}"]').click()
-            dl = download.value
-            dl.save_as(f"downloads/{name.replace('/', '_')}.pdf")
-        except Exception as e:
-            print(f"⚠️ PDF download failed for {name}: {e}")
+                writer.writerow([
+                    district_name, post_name, nagarnikay, wardno, reservation_status,
+                    candidate_name, guardian_name, gender, age, category,
+                    address, mobile_no, photo_filename, affidavit_filename
+                ])
 
     def run_all_combinations(self):
         try:
             self.navigate()
-            os.makedirs("downloads", exist_ok=True)
 
             districts = self.get_select_options('select#ddlDistrict')
             posts = self.get_select_options('select#ddlPosts')
